@@ -20,6 +20,28 @@ def prepare_VB_config(VB_config):
     separated into more submodules
 """
 
+# class EncoderBase(nn.Module):
+#     def __init__(self, in_shape, K=256, beta=1e-3, bias=False, *args, **kwargs):
+#         super(EncoderBase, self).__init__()
+#         self.in_shape = in_shape
+#         self.K = K
+#         self.beta = beta
+#         self.bias = bias
+
+#     def reparameterize(self, mu, std):
+#         def check_number(vector):
+#             if isinstance(vector, Number):
+#                 return torch.Tensor([vector])
+#             else:
+#                 return vector
+#         mu = check_number(mu)
+#         std = check_number(std)
+#         eps = Variable(std.data.new(std.size()).normal_().to(mu.device))
+#         return mu + eps * std
+
+#     def loss(self):
+#         return self.beta * torch.mean(-0.5 * torch.sum(1 + self.std - self.mu ** 2 - self.std.exp(), dim = 1)) # https://github.com/AntixK/PyTorch-VAE/blob/master/models/vanilla_vae.py
+    
 class EncoderBase(nn.Module):
     def __init__(self, in_shape, K=256, beta=1e-3, bias=False, *args, **kwargs):
         super(EncoderBase, self).__init__()
@@ -27,18 +49,30 @@ class EncoderBase(nn.Module):
         self.K = K
         self.beta = beta
         self.bias = bias
+        self.fixed_epsilon = None
 
     def reparameterize(self, mu, std):
         def check_number(vector):
             if isinstance(vector, Number):
-                return torch.Tensor([vector])
-            else:
-                return vector
+                return torch.Tensor([vector]).to(mu.device)
+            return vector
+
         mu = check_number(mu)
         std = check_number(std)
-        eps = Variable(std.data.new(std.size()).normal_().to(mu.device))
-        return mu + eps * std
 
+
+
+        if self.fixed_epsilon is not None:
+            if self.fixed_epsilon.shape != std.shape:
+                raise ValueError(
+                    f"Shape mismatch: fixed_epsilon {self.fixed_epsilon.shape} vs std {std.shape}"
+                )
+            eps = self.fixed_epsilon
+        else:
+            eps = torch.randn_like(std)
+
+        return mu + eps * std
+    
     def loss(self):
         return self.beta * torch.mean(-0.5 * torch.sum(1 + self.std - self.mu ** 2 - self.std.exp(), dim = 1)) # https://github.com/AntixK/PyTorch-VAE/blob/master/models/vanilla_vae.py
     
@@ -106,6 +140,9 @@ class FullyConvolutionalVariationalBottleneck(nn.Module):
 
     def forward(self, x):
         encoding = self.encoder(x)
+        if not hasattr(self, "_printed"):
+          print("VB LATENT SHAPE:", self.encoder.std.shape)
+          self._printed = True
         self.out_feats = self.decoder(encoding)
         return self.out_feats
 
@@ -272,3 +309,76 @@ def get_layer(layer_str, parameters, force_parameters=False, **kwargs):
     if 'BatchNorm' in layer_str or 'InstanceNorm' in layer_str and not force_parameters:
         parameters = [kwargs['channels']]
     return eval(f'{layer_str}(*parameters)')
+
+from torch import nn
+
+class MaskDropout(nn.Dropout):
+    def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
+        super().__init__(p, inplace)
+        self.do_mask = None
+        self.mask_shape = None
+        self.use_mask = False
+        self.track_mask = False
+        self.p = p
+
+    def forward(self, x):
+        if self.use_mask and self.do_mask is not None and not self.track_mask:
+            return x * self.do_mask * (1/(1-self.p))
+        else:
+            x = super().forward(x)
+            if self.track_mask:
+                self.do_mask = (x != 0)
+                self.mask_shape = self.do_mask.shape
+                self.track_mask = False
+            return x
+
+
+"""This is code for median pooling from https://gist.github.com/rwightman.
+
+https://gist.github.com/rwightman/f2d3849281624be7c0f11c85c87c1598
+"""
+class MedianPool2d(nn.Module):
+    """Median pool (usable as median filter when stride=1) module.
+
+    Args:
+         kernel_size: size of pooling kernel, int or 2-tuple
+         stride: pool stride, int or 2-tuple
+         padding: pool padding, int or 4-tuple (l, r, t, b) as in pytorch F.pad
+         same: override padding and enforce same padding, boolean
+    """
+
+    def __init__(self, kernel_size=3, stride=1, padding=0, same=True):
+        """Initialize with kernel_size, stride, padding."""
+        super().__init__()
+        self.k = _pair(kernel_size)
+        self.stride = _pair(stride)
+        self.padding = _quadruple(padding)  # convert to l, r, t, b
+        self.same = same
+
+    def _padding(self, x):
+        if self.same:
+            ih, iw = x.size()[2:]
+            if ih % self.stride[0] == 0:
+                ph = max(self.k[0] - self.stride[0], 0)
+            else:
+                ph = max(self.k[0] - (ih % self.stride[0]), 0)
+            if iw % self.stride[1] == 0:
+                pw = max(self.k[1] - self.stride[1], 0)
+            else:
+                pw = max(self.k[1] - (iw % self.stride[1]), 0)
+            pl = pw // 2
+            pr = pw - pl
+            pt = ph // 2
+            pb = ph - pt
+            padding = (pl, pr, pt, pb)
+        else:
+            padding = self.padding
+        return padding
+
+    def forward(self, x):
+        # using existing pytorch functions and tensor ops so that we get autograd,
+        # would likely be more efficient to implement from scratch at C/Cuda level
+        x = F.pad(x, self._padding(x), mode='reflect')
+        x = x.unfold(2, self.k[0], self.stride[0]).unfold(3, self.k[1], self.stride[1])
+        x = x.contiguous().view(x.size()[:4] + (-1,)).median(dim=-1)[0]
+        return x

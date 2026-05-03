@@ -365,53 +365,35 @@ class History(object):
         return summary_dict
 
     def save(self, path=None):
-        """
-        Saves the History object to a file.
-
-        Parameters:
-            path (str, optional): The file path. Default is None.
-
-        Returns:
-            None
-        """
-        assert self.savefile or path, 'If the History object has no default savefile you have to provide a path!'
-        path = self.savefile if path is None else path
-        path = path if path.endswith('.history') else path + '.history'
-        with open(path, 'wb') as file:
-            dill.dump(self.__dict__, file)
-    
-    def load(self, path=None, force = False):
-        """
-        Loads a History object from a file.
-
-        Parameters:
-            path (str, optional): The file path. Default is None.
-            force (bool, optional): If True, forces the loading even without file extension. Default is False.
-
-        Returns:
-            None
-        """
-        assert self.savefile or path, 'If the History object has no default savefile you have to provide a path!'
-        if not force:
+            import os # Ensure os is available
+            assert self.savefile or path, 'If the History object has no default savefile you have to provide a path!'
             path = self.savefile if path is None else path
             path = path if path.endswith('.history') else path + '.history'
-        with open(path, 'rb') as file:
-            self.__dict__ = dill.load(file)
+            
+            # Ensure the directory exists before saving
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            
+            with open(path, 'wb') as file:
+                dill.dump(self.__dict__, file)
+    
+    def load(self, path=None, force=False):
+            assert self.savefile or path, 'If the History object has no default savefile you have to provide a path!'
+            if not force:
+                path = self.savefile if path is None else path
+                path = path if path.endswith('.history') else path + '.history'
+            with open(path, 'rb') as file:
+                self.__dict__ = dill.load(file)
 
     def to_csv(self, path=None):
-        """
-        Saves the History object to a CSV file.
-
-        Parameters:
-            path (str, optional): The file path. Default is None.
-
-        Returns:
-            None
-        """
-        assert self.savefile or path, 'If the History object has no default savefile you have to provide a path!'
-        path = self.savefile if path is None else path
-        path = path if path.endswith('.csv') else path + '.csv'
-        self.df.to_csv(path, index=False)
+            import os
+            assert self.savefile or path, 'If the History object has no default savefile you have to provide a path!'
+            path = self.savefile if path is None else path
+            path = path if path.endswith('.csv') else path + '.csv'
+            
+            # Ensure the directory exists before saving csv
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            
+            self.df.to_csv(path, index=False)
 
     def from_csv(self, path=None):
         """

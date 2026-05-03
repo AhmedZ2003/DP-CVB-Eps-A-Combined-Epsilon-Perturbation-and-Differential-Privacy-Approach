@@ -8,6 +8,37 @@ from src.metrics import get_metric_function
 from src.utils import timer, get_dataset_mean_dev_tensors, EarlyStopping, set_optimizer, set_scheduler
 from src.loss import TV, get_loss_function
 from src.models.modules import MedianPool2d
+from src.models.cvb_dp_defense import sanitize_gradients_
+
+def _sanitize_named_gradients(named_gradients: OrderedDict, defense_cfg) -> None:
+    """Apply DP clip+noise to a dict of detached victim gradients in-place.
+
+    This replicates what FederatedTrainer.train_step does via
+    model.sanitize_shared_gradients(), but operates directly on the
+    OrderedDict returned by get_gradient() so that the victim gradient
+    seen by the attacker is G~ = DP(G), matching the real FL setting.
+
+    We clip the global gradient norm across all layers first, then add
+    independent Gaussian noise to each tensor — identical to the
+    per-batch DPSGD routine in cvb_dp_defense.sanitize_gradients_().
+    """
+    grads = [g for g in named_gradients.values() if g is not None]
+    if not grads:
+        return
+
+    # Step 1: gradient clipping (same formula as _clip_aggregated_gradients)
+    total_norm = torch.norm(torch.stack([g.norm(2) for g in grads]), 2)
+    clip_coef = defense_cfg.clip_norm / (total_norm.item() + 1e-12)
+    if clip_coef < 1.0:
+        for g in grads:
+            g.mul_(clip_coef)
+
+    # Step 2: Gaussian noise injection
+    noise_std = defense_cfg.noise_multiplier * defense_cfg.clip_norm
+    for key in named_gradients:
+        if named_gradients[key] is not None:
+            named_gradients[key] = named_gradients[key] + \
+                torch.randn_like(named_gradients[key]) * noise_std
 
 def get_attack(attack, dataset, model, victim_inputs, victim_targets, config, *args, **kwargs):
     if attack == 'IG':
@@ -16,6 +47,10 @@ def get_attack(attack, dataset, model, victim_inputs, victim_targets, config, *a
         return CPL(dataset, model, victim_inputs, victim_targets, config, *args, **kwargs)
     elif attack == 'iDLG':
         return iDLG(dataset, model, victim_inputs, victim_targets, config, *args, **kwargs)
+    elif attack == 'PIG':
+        return PIG(dataset, model, victim_inputs, victim_targets, config, *args, **kwargs)
+    elif attack == 'VBIA':
+        return VBIA(dataset, model, victim_inputs, victim_targets, config, *args, **kwargs)
     else:
         raise NotImplementedError(f'Attack {attack} is not implemented yet!')
 
@@ -138,6 +173,19 @@ class IterativeGradientInversionAttack:
         named_gradients = OrderedDict()
         for grad, (name, param) in zip(gradient, self.model.named_parameters()):
             named_gradients[name] = grad if create_graph else grad.detach()
+
+        # Apply DP gradient sanitization to the victim gradient.
+        # This mirrors exactly what happens in FederatedTrainer.train_step after
+        # loss.backward(): the gradient the server observes is G~ = DP(G), not G.
+        # We only do this for the victim's gradient (create_graph=False); the
+        # attacker's closure uses create_graph=True and must not be sanitized.
+        if not create_graph:
+            defense_cfg = getattr(self.model, 'privacy_defense', None)
+            if defense_cfg is not None and defense_cfg.enabled:
+                # Build a temporary parameter-like view so sanitize_gradients_
+                # can clip+noise the named_gradients dict directly.
+                _sanitize_named_gradients(named_gradients, defense_cfg)
+
         return named_gradients, prediction
 
     @timer
@@ -166,12 +214,12 @@ class IterativeGradientInversionAttack:
                 with torch.no_grad():
                     if self.config.clip_dummies:
                         dummy_data.data = torch.max(torch.min(dummy_data, (1 - self.data_mean) / self.data_std), -self.data_mean / self.data_std)
-
                     if self.filter and (i+1) % self.config.dummy_filter.iteration == 0:
                         dummy_data.data = self.filter(dummy_data)
 
                 if hasattr(self, 'attack_specific_post_processing'):
                     self.attack_specific_post_processing()
+
 
                 if scheduler:
                     if scheduler.after_val:
@@ -301,4 +349,109 @@ class iDLG(IterativeGradientInversionAttack):
         super().__init__(model, victim_inputs, victim_targets, config, *args, **kwargs)
         self.regularization = None
         self.filter = None
-    
+class PIG(IterativeGradientInversionAttack):
+    def attack_specific_regularization(self, inversion_loss, *args, **kwargs):
+        if self.config.regularization:
+            return inversion_loss + self.config.regularization * TV(kwargs['dummy_data'])
+        return inversion_loss
+        
+class VBIA(IterativeGradientInversionAttack):
+    """
+    Variational Bottleneck Inversion Attack (VBIA).
+
+    Jointly optimizes the dummy image and the reparameterization noise epsilon
+    to mimic the stochastic state of the CVB during training.
+    """
+    def __init__(self, dataset, model, victim_inputs, victim_targets, config, *args, **kwargs):
+        super().__init__(dataset, model, victim_inputs, victim_targets, config, *args, **kwargs)
+
+        if self.config.latent_shape is None:
+            raise ValueError("VBIA requires attack.latent_shape to be set in the config.")
+
+        self.latent_shape = tuple(self.config.latent_shape)
+        self.filter = None
+
+    def init_attack_specifics(self, vic_target):
+        torch.cuda.empty_cache()
+
+        dummy_data, _ = self.init_dummies()
+
+        self.dummy_epsilon = torch.randn(
+            (self.victim_batchsize, *self.latent_shape),
+            device=self.device
+        ).requires_grad_(True)
+
+        optimizer = set_optimizer([dummy_data, self.dummy_epsilon], self.config.optimizer)
+        return dummy_data, vic_target, optimizer
+
+    def _set_fixed_epsilon(self):
+        """
+        Inject the current dummy epsilon into CVB-like modules that support
+        externally fixed reparameterization noise.
+        """
+        for module in self.model.modules():
+            if 'CVB' in module.__class__.__name__ or hasattr(module, 'fixed_epsilon'):
+                module.fixed_epsilon = self.dummy_epsilon
+
+    def _clear_fixed_epsilon(self):
+        """
+        Clear injected epsilon after use so the model does not keep stale state.
+        """
+        for module in self.model.modules():
+            if hasattr(module, 'fixed_epsilon'):
+                module.fixed_epsilon = None
+
+    def _gradient_closure(self, optimizer, dummy_data, label, gradient):
+        def closure():
+            optimizer.zero_grad()
+
+            if self.config.attacker_train_mode:
+                self.model.train()
+            else:
+                self.model.eval()
+
+            self._set_fixed_epsilon()
+
+            dummy_grad, prediction = self.get_gradient(dummy_data, label, create_graph=True)
+            inversion_loss = self.grad_loss_fn(dummy_grad, gradient)
+
+            if hasattr(self, 'attack_specific_regularization'):
+                inversion_loss = self.attack_specific_regularization(
+                    inversion_loss,
+                    dummy_data=dummy_data,
+                    gradient=gradient,
+                    dummy_gradient=dummy_grad,
+                    prediction=prediction,
+                    label=label
+                )
+
+            inversion_loss.backward()
+
+            if self.config.use_grad_signs and dummy_data.grad is not None:
+                dummy_data.grad.sign_()
+
+            return inversion_loss.item()
+
+        return closure
+
+    def attack_batch(self, gradient, vic_target):
+        try:
+            return super().attack_batch(gradient, vic_target)
+        finally:
+            self._clear_fixed_epsilon()
+
+    def attack_specific_regularization(self, inversion_loss, *args, **kwargs):
+      loss = inversion_loss
+
+      # TV regularization (image)
+      if self.config.regularization:
+          loss = loss + self.config.regularization * TV(kwargs['dummy_data'])
+
+      # NEW: epsilon regularization
+      eps_reg = 0.001 * torch.mean(self.dummy_epsilon ** 2)
+
+      return loss + eps_reg
+
+    def attack_specific_post_processing(self):
+      with torch.no_grad():
+          self.dummy_epsilon.clamp_(-3.0, 3.0)

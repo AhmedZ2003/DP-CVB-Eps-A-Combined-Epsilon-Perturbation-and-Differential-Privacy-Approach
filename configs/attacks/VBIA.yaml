@@ -1,0 +1,67 @@
+attack:
+  name: VBIA
+  metrics: [ScaledMSE, ScaledPSNR, ScaledSSIM, ScaledLPIPS]
+  reconstruction_quality_metric: SSIM
+  reduce_metrics: False
+  train_mode: True
+  attacker_train_mode: True
+
+  optimizer:
+    name: Adam
+    lr: 0.01
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0
+
+  scheduler:
+    name: ReduceLROnPlateau
+    metric: ReconstructionLoss
+    use_loss: False
+    mode: min
+    factor: 0.5
+    patience: 300
+
+  early_stopping:
+    patience: 5000
+    delta: 0
+    metric: ReconstructionLoss
+    use_loss: False
+    subject_to: min
+    verbose: False
+
+  ckpt: 0
+  rec_seed: 42
+  victim_batchsize: 1
+  max_iterations: 25000
+  max_trials: 1
+  init: randn
+  reconstruction_loss: GCosineDistance
+  regularization: 0.01
+
+  latent_shape: [8, 14, 14]
+
+  ignore_gradient_layers: []
+  top_k: null
+  use_grad_signs: False
+  clip_dummies: True
+
+  # NEW
+  image_lr: 0.03
+  epsilon_lr: 0.003
+  image_warmup_iters: 800
+
+  use_mean_init: True
+  mean_init_std: 0.08
+
+  tv_weight: 0.01
+  image_l2_weight: 0.0001
+  range_weight: 0.001
+  eps_reg_weight: 0.001
+
+  epsilon_samples: 3
+  epsilon_jitter_std: 0.05
+  epsilon_clip: 3.0
+
+  blur_early: True
+  blur_until: 1200
+  blur_every: 50

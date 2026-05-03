@@ -1,0 +1,40 @@
+attack:
+  name: PIG
+  metrics:
+  reconstruction_quality_metric: SSIM
+  reduce_metrics: False
+  train_mode: True
+  attacker_train_mode: True
+  optimizer: 
+    name: LBFGS # LBFGS is the standard for PIG to ensure stable convergence [3]
+    lr: 0.01
+  scheduler: 
+    name: ReduceLROnPlateau 
+    metric: ReconstructionLoss
+    use_loss: False
+    mode: min 
+    factor: 0.1
+    patience: 40
+  early_stopping: 
+    patience: 400
+    delta: 0 
+    metric: ReconstructionLoss
+    use_loss: False 
+    subject_to: min 
+    verbose: False
+  ckpt: 0 
+  rec_seed: 0 
+  victim_batchsize: 1
+  max_iterations: 2000 
+  max_trials: 1
+  init: randn 
+  reconstruction_loss: GL2 # Or CosineSimilarity for deeper architectures [4]
+  regularization: 0.01 # Weight for Total Variation (TV) denoising [5]
+  
+  # CRITICAL: List the exact names of the stochastic layers to ignore.
+  # This must include the CVB module and every layer following it.
+  ignore_gradient_layers: ['cvb', 'decoder', 'fc', 'classifier'] 
+  
+  top_k: null
+  use_grad_signs: False
+  clip_dummies: False

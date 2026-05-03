@@ -29,9 +29,11 @@ class FederatedTrainer:
         eval_ds_name = self.loss_fn.name + '_L'
         self.loss_fn.eval_ds_name = 'VAL_' + eval_ds_name if self.use_val else 'TST_' + eval_ds_name
         
+        # NEW CODE
         self.metrics = []
         for m in config.training.metrics:
-            self.metrics.append(get_metric_function(m, num_classes = self.config.num_classes, model=self.model).to(self.device))
+            # Removed model=self.model
+            self.metrics.append(get_metric_function(m, num_classes = self.config.num_classes).to(self.device))
 
         self._set_optimizers()
 
@@ -186,11 +188,21 @@ class FederatedTrainer:
                 print('loss is nan in batch {}!'.format(batch_num))
                 raise Exception('loss is nan in batch {}!'.format(batch_num))
 
+            # loss.backward()
+
+            # if self.config.training.gradient_clipping:
+            #     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.gradient_clipping)
+            
+            # self._optimizer_step()
+
             loss.backward()
+
+            if hasattr(self.model, "sanitize_shared_gradients"):
+                self.model.sanitize_shared_gradients(batch_size=inputs.shape[0])
 
             if self.config.training.gradient_clipping:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.gradient_clipping)
-            
+
             self._optimizer_step()
 
             #calculate all metrics
@@ -629,6 +641,7 @@ class SiloFederatedAveragingEnvironment:
         if best:
             path += '_best'
         statepath = path if path.endswith('.state') else path + '.state'
+        os.makedirs(os.path.dirname(statepath), exist_ok=True)
         torch.save(self.global_model, statepath)
 
     def load(self, path=None, best=False):

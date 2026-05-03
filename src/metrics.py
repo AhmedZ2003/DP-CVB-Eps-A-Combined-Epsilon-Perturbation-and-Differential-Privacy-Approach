@@ -60,10 +60,14 @@ def get_metric_function(metric, *args, **kwargs):
         metric = metrics_dict.metrics[metric]
         
     assert metric.name in IMPLEMENTED_METRICS, f'The metric function {metric.name} is not yet implemented or checked.'
-    metric_args = metric.metric_args if metric.metric_args else {} #because some torch metrics dont need any arguments
+    # Add this line to remove 'model' if it exists in the dictionary
+    kwargs.pop('model', None) 
+
+    metric_args = metric.metric_args if metric.metric_args else {}
     if metric.own_implementation:
         metric_function = eval(metric.name)(**metric_args, **kwargs)
     else:
+        # Now kwargs is clean and won't crash torchmetrics
         metric_function = eval('torchmetrics.'+metric.tm_name)(**metric_args, **kwargs)
     
     #add functionality to the metric function
