@@ -12,7 +12,7 @@ Our work addresses the vulnerability of CVB to the Variational Bottleneck Invers
 
 **Affiliation:** Department of Artificial Intelligence, FAST-NUCES, Islamabad, Pakistan
 
-**Paper:** [Read the Research Paper](paper/DP_CVB_Epsilon_Perturbation.pdf)
+**Paper:** [Read the Research Paper](DP-CVB-Eps-A-Combined-Epsilon-Perturbation-and-Differential-Privacy-Approach.pdf)
 
 ## Key Contributions
 
